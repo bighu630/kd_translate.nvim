@@ -1,4 +1,4 @@
-local api, fn = vim.api, vim.fn
+local api = vim.api
 
 local kd = require("kd")
 local command = api.nvim_create_user_command
