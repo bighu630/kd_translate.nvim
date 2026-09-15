@@ -45,6 +45,8 @@ M.config = {
 		},
 	},
 }
+-- setup() 以默认配置为基准合并，保存一份深拷贝保证重复调用幂等
+local default_config = vim.deepcopy(M.config)
 local translate_cmd = "kd"
 
 -- 添加一个全局变量来跟踪当前的翻译窗口
@@ -357,7 +359,7 @@ function M._translate(mode)
 end
 -- 修改 setup 函数
 function M.setup(opts)
-	M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+	M.config = vim.tbl_deep_extend("force", vim.deepcopy(default_config), opts or {})
 	-- 初始设置高亮
 	M.set_highlights()
 end
