@@ -164,6 +164,33 @@ function M.set_highlights()
 	end
 end
 
+-- kd 的部分上游数据源会返回 HTML 实体（例如 &#x27;），统一解码后再显示
+local HTML_ENTITIES = {
+	amp = "&",
+	lt = "<",
+	gt = ">",
+	quot = '"',
+	apos = "'",
+	nbsp = " ",
+}
+
+---解码字符串中的 HTML 实体（数字实体 + 常见命名实体）
+---@param text string
+---@return string
+local function decode_entities(text)
+	text = text:gsub("&#[xX](%x+);?", function(hex)
+		local code = tonumber(hex, 16)
+		return code and vim.fn.nr2char(code) or nil
+	end)
+	text = text:gsub("&#(%d+);?", function(dec)
+		local code = tonumber(dec)
+		return code and vim.fn.nr2char(code) or nil
+	end)
+	return (text:gsub("&(%a+);?", function(name)
+		return HTML_ENTITIES[name]
+	end))
+end
+
 ---过滤掉 kd 输出中的无关提示行
 ---@param text string
 ---@return string[]
@@ -171,6 +198,7 @@ local function filter_lines(text)
 	local lines = vim.split(text, "\n")
 	local filtered = {}
 	for _, line in ipairs(lines) do
+		line = decode_entities(line)
 		if not line:find("未找到守护进程") and not line:find("成功启动守护进程") then
 			table.insert(filtered, line)
 		end
