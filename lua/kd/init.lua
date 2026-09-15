@@ -268,17 +268,15 @@ end
 ---检查窗口是否有效
 ---@return boolean
 function TranslateWindow:is_valid()
-	if current_window then
-		return self.winid and api.nvim_win_is_valid(self.winid)
-	else
-		return false
-	end
+	return self.winid ~= nil and api.nvim_win_is_valid(self.winid)
 end
 
 ---关闭窗口
 function TranslateWindow:close()
 	if self:is_valid() then
 		api.nvim_win_close(self.winid, true)
+	end
+	if current_window == self then
 		current_window = nil
 	end
 end
