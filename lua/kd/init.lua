@@ -245,9 +245,12 @@ function TranslateWindow:setup_keymaps()
 	end, { noremap = true, silent = true, buffer = self.bufnr })
 end
 
--- 设置 autocmds
+-- 设置 autocmds（用具名 augroup，反复翻译时不会累积）
 function TranslateWindow:setup_autocmds()
+	self.augroup = api.nvim_create_augroup("kd_translate_window", { clear = true })
+
 	api.nvim_create_autocmd({ "CursorMoved" }, {
+		group = self.augroup,
 		buffer = api.nvim_get_current_buf(),
 		callback = function()
 			self:close()
@@ -255,6 +258,7 @@ function TranslateWindow:setup_autocmds()
 	})
 
 	api.nvim_create_autocmd({ "WinLeave" }, {
+		group = self.augroup,
 		buffer = self.bufnr,
 		callback = function()
 			self:close()
@@ -272,6 +276,11 @@ end
 function TranslateWindow:close()
 	if self:is_valid() then
 		api.nvim_win_close(self.winid, true)
+	end
+	if self.augroup then
+		-- 清理本窗口注册的 autocmd，避免关窗后残留
+		pcall(api.nvim_clear_autocmds, { group = self.augroup })
+		self.augroup = nil
 	end
 	if current_window == self then
 		current_window = nil
