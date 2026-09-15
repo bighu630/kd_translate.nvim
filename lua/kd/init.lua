@@ -178,6 +178,48 @@ local function filter_lines(text)
 	return filtered
 end
 
+-- 内容极少时窗口也不低于此高度，避免浮窗过扁
+local MIN_WINDOW_HEIGHT = 3
+
+---估算文本在给定内容宽度下折行后占用的显示行数
+---（考虑 CJK 等宽字符，与窗口的 wrap=true 配合）
+---@param lines string[]
+---@param width integer 窗口内容宽度（列）
+---@return integer
+local function wrapped_row_count(lines, width)
+	local avail = math.max(1, width)
+	local rows = 0
+	for _, line in ipairs(lines) do
+		rows = rows + math.max(1, math.ceil(vim.fn.strdisplaywidth(line) / avail))
+	end
+	return math.max(rows, 1)
+end
+
+---根据内容计算翻译浮窗尺寸（占位态与结果态共用）
+---宽度：随内容收缩，不超过配置的上限，并以标题宽度兜底；
+---高度：按折行后的显示行数自适应，夹在 [MIN_WINDOW_HEIGHT, 配置上限] 之间。
+---@param lines string[] 待显示的文本行（已过滤）
+---@return integer width
+---@return integer height
+local function compute_window_size(lines)
+	local cfg = M.config.window
+	local max_width = math.max(1, math.min(cfg.width, vim.o.columns - 4))
+	local max_height = math.max(1, math.min(cfg.height, vim.o.lines - 4))
+
+	local longest = 0
+	for _, line in ipairs(lines) do
+		longest = math.max(longest, vim.fn.strdisplaywidth(line))
+	end
+	-- 标题画在顶部边框上，宽度至少能容下标题
+	local title_width = math.min(vim.fn.strdisplaywidth(cfg.title or ""), max_width)
+	local width = math.max(1, math.min(max_width, math.max(longest, title_width)))
+
+	local min_height = math.min(MIN_WINDOW_HEIGHT, max_height)
+	local height = math.min(max_height, math.max(wrapped_row_count(lines, width), min_height))
+
+	return width, height
+end
+
 ---@class TranslateWindow
 local TranslateWindow = {}
 TranslateWindow.__index = TranslateWindow
@@ -192,7 +234,8 @@ function TranslateWindow.new(text, loading)
 
 	-- 创建缓冲区
 	self.bufnr = api.nvim_create_buf(false, true)
-	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, filter_lines(text))
+	local lines = filter_lines(text)
+	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, lines)
 	-- 设置缓冲区选项
 	vim.bo[self.bufnr].modifiable = false
 	vim.bo[self.bufnr].filetype = "kd" -- 这会自动加载我们的语法文件
@@ -204,9 +247,8 @@ function TranslateWindow.new(text, loading)
 		M.set_highlights() -- 使用 M.set_highlights
 	end)
 
-	-- 计算窗口尺寸
-	local width = math.min(M.config.window.width, vim.o.columns - 4)
-	local height = math.min(M.config.window.height, vim.o.lines - 4)
+	-- 计算窗口尺寸（宽高随内容自适应，占位态与结果态共用同一逻辑）
+	local width, height = compute_window_size(lines)
 
 	-- 设置窗口配置
 	self.win_opts = vim.tbl_extend("force", M.config.window, {
@@ -236,6 +278,17 @@ function TranslateWindow:open()
 	end)
 end
 
+---按当前缓冲区内容重新计算并应用窗口尺寸
+function TranslateWindow:resize()
+	if not self:is_valid() then
+		return
+	end
+	local width, height = compute_window_size(api.nvim_buf_get_lines(self.bufnr, 0, -1, false))
+	self.win_opts.width = width
+	self.win_opts.height = height
+	api.nvim_win_set_config(self.winid, { width = width, height = height })
+end
+
 ---原地替换窗口内容（用于加载态占位窗转为最终结果）
 ---@param text string
 function TranslateWindow:set_text(text)
@@ -246,6 +299,8 @@ function TranslateWindow:set_text(text)
 	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, filter_lines(text))
 	vim.bo[self.bufnr].modifiable = false
 	self.loading = false
+	-- 结果态尺寸可能与占位态不同，重新自适应
+	self:resize()
 end
 
 ---设置按键映射（仅作用于翻译结果窗口）
@@ -254,20 +309,20 @@ function TranslateWindow:setup_keymaps()
 	vim.keymap.set("n", "q", ":q<CR>", opts)
 	vim.keymap.set("n", "<ESC>", ":q<CR>", opts)
 	-- 滚动只在翻译结果窗口内生效，不再绑定到用户自己的 buffer
-	local scroll_lines = math.floor(api.nvim_win_get_height(self.winid) / 2) -- half sceen scroll
-	vim.keymap.set("n", M.config.keymap.scrollDown, function()
+	-- 高度会随内容（占位态 → 结果态）变化，所以每次滚动时实时取窗口高度的一半
+	local function scroll_by(direction)
 		if api.nvim_win_is_valid(self.winid) then
+			local scroll_lines = math.max(1, math.floor(api.nvim_win_get_height(self.winid) / 2))
 			api.nvim_win_call(self.winid, function()
-				vim.cmd("normal!" .. scroll_lines .. "j")
+				vim.cmd("normal!" .. scroll_lines .. direction)
 			end)
 		end
+	end
+	vim.keymap.set("n", M.config.keymap.scrollDown, function()
+		scroll_by("j")
 	end, { noremap = true, silent = true, buffer = self.bufnr })
 	vim.keymap.set("n", M.config.keymap.scrollUp, function()
-		if api.nvim_win_is_valid(self.winid) then
-			api.nvim_win_call(self.winid, function()
-				vim.cmd("normal!" .. scroll_lines .. "k")
-			end)
-		end
+		scroll_by("k")
 	end, { noremap = true, silent = true, buffer = self.bufnr })
 end
 
