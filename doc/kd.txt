@@ -1,0 +1,240 @@
+================================================================================
+kd.txt                          一个轻量的 Neovim 查词 / 翻译插件    *kd* *kd.txt*
+
+简介                                                          *kd-introduction*
+
+  插件自身不提供翻译能力。它把光标下的单词或可视选区交给外部命令行工具 kd
+  执行，再把返回的文本渲染到一个浮窗中。
+
+  上游插件：https://github.com/SilverofLight/kd_translate.nvim
+  本仓库是它的 fork。
+
+  本文档只描述当前代码实际支持的命令、配置项与键位；安装示例与截图见仓库
+  根目录的 README.md。
+
+目录                                                            *kd-contents*
+
+  |kd-requirements|    依赖与前置条件
+  |kd-install|         安装与配置示例
+  |kd-commands|        命令
+  |kd-configuration|   配置项
+  |kd-keymaps|         浮窗内的默认键位
+  |kd-behavior|        行为细节
+  |kd-highlights|      高亮组
+  |kd-api|             Lua API
+
+==============================================================================
+依赖与前置条件                                              *kd-requirements*
+
+  - Neovim >= 0.10
+    插件通过 |vim.system()| 调用外部命令，0.9 及更早版本不可用。
+
+  - 外部命令 `kd`（https://github.com/Karmenzind/kd）
+    必须先安装、并且能在 `$PATH` 中找到，否则插件无法翻译。可以用
+    `:!kd --help` 验证是否可用。若 kd 的退出码不是 0，插件会通过
+    |vim.notify()| 提示“翻译失败: <stderr>”，并且不会打开浮窗。
+
+==============================================================================
+安装与配置示例                                                    *kd-install*
+
+  插件不设置任何全局键位，键位由用户自己或插件管理器绑定。以 lazy.nvim
+  为例： >
+
+    return {
+      "SilverofLight/kd_translate.nvim",
+      config = function()
+        require("kd").setup({
+          window = {
+            -- 在这里覆盖窗口配置，见 |kd-configuration|
+          },
+        })
+      end,
+      keys = {
+        { "<leader>t", ":TranslateNormal<CR>", mode = "n", desc = "翻译光标下的单词" },
+        { "<leader>t", ":TranslateVisual<CR>", mode = "v", desc = "翻译可视选区" },
+      },
+    }
+<
+  |kd.setup()| 可以重复调用：每次都以默认配置为基准深合并传入的 opts，因此
+  重复调用不会让配置累积，省略的字段会回落到默认值。
+
+==============================================================================
+命令                                                            *kd-commands*
+
+  plugin/kd.lua 会注册下面两个用户命令：
+
+  :TranslateNormal                                          *:TranslateNormal*
+        翻译光标下的单词（等价于 |<cword>|）。没有参数，也不接受范围。
+
+  :TranslateVisual                                          *:TranslateVisual*
+        翻译最近一次的可视选区。命令虽然声明了 `range`，但实现并不使用传入
+        的范围，而是通过 |gv| 恢复上一次选区、再从 `v` 寄存器取出内容。
+        如果没有可用的选区，会提示“没有选中内容”并返回空字符串，随后仍然
+        会以空文本调用一次 kd。
+
+  两个命令都调用 |kd._translate()|：
+
+  - 如果已经存在一个有效的翻译浮窗，则不会重新翻译，而是把光标切换到该
+    浮窗（|nvim_set_current_win()|）；再次按下触发键即可进入浮窗查看/滚动。
+  - 否则调用 |kd.translate()| 取词并异步执行 kd。
+
+  需要在可视模式下直接使用命令时，按上面 lazy.nvim 示例的方式把
+  `:TranslateVisual<CR>` 绑定到 `mode = "v"` 即可。
+
+==============================================================================
+配置项                                                     *kd-configuration*
+
+  下面的 setup 调用展示了全部默认值： >
+
+    require("kd").setup({
+      window = {
+        width = 80,
+        height = 10,
+        border = "rounded",
+        title = " 翻译结果 ",
+        title_pos = "center",
+        style = "minimal",
+        relative = "cursor",
+        focusable = true,
+        row = 1,
+        col = 0,
+      },
+      keymap = {
+        scrollDown = "<C-f>",
+        scrollUp = "<C-b>",
+      },
+      highlights = {
+        word = { fg = "#FF0000", bold = false, italic = false, underline = true },
+        phonetic = { fg = "#00FF00", bg = "NONE", bold = false, italic = true, underline = false },
+        level = { fg = "#FF0000", bg = "NONE", bold = false, italic = true, underline = false },
+      },
+    })
+<
+window ~
+  width       (number,  80)          最大宽度。实际宽度取
+                                     min(width, &columns - 4)。
+  height      (number,  10)          最大高度。实际高度取
+                                     min(height, &lines - 4)。
+  border      (string,  "rounded")   边框样式，取值见 |nvim_open_win()|。
+  title       (string,  " 翻译结果 ") 浮窗标题。
+  title_pos   (string,  "center")    标题位置。
+  style       (string,  "minimal")   窗口样式。
+  relative    (string,  "cursor")    相对定位的目标。
+  focusable   (boolean, true)        浮窗是否可以获得焦点。
+  row         (number,  1)           垂直偏移（相对光标）。
+  col         (number,  0)           水平偏移（相对光标）。
+
+  整个 window 表会交给 |nvim_open_win()|，其中 width、height 以及
+  zindex（固定为 100）由插件计算后覆盖，写在配置里的这三个值不生效。
+
+keymap ~
+  scrollDown  (string, "<C-f>")      向下滚动，行数为浮窗高度的一半
+                                     （向下取整）。
+  scrollUp    (string, "<C-b>")      向上滚动，行数为浮窗高度的一半
+                                     （向下取整）。
+  这两个键位只在翻译浮窗内生效，细节见 |kd-keymaps|。
+
+highlights ~
+  word / phonetic / level 三组高亮，分别对应浮窗首行的单词、首行方括号内的
+  音标，以及形如 CET4 / CET6 / TEM4 / TEM8 的等级行，细节见
+  |kd-highlights|。每组的可用字段：
+
+  fg          (string)   拼成 `guifg=`，例如 "#FF0000"。
+  bg          (string)   拼成 `guibg=`；不设置时完全不写 guibg，
+                         "NONE" 会生成 `guibg=NONE`。
+  bold        (boolean)  为 true 时加入 `gui=bold`。
+  italic      (boolean)  为 true 时加入 `gui=italic`。
+  underline   (boolean)  为 true 时加入 `gui=underline`。
+
+  注意：这三组高亮是全局的，由 M.set_highlights() 通过 `:highlight` 命令写入，
+  不依赖 colorscheme 中的定义。|kd.setup()| 时会应用一次，每次创建浮窗时也会
+  再应用一次，因此重新 setup 会连已经打开的浮窗一起改色；反过来，切换
+  colorscheme 会清掉这些高亮组，重新 setup 或再翻译一次即可恢复。
+
+==============================================================================
+浮窗内的默认键位                                                *kd-keymaps*
+
+  下面的键位是 buffer-local（且 noremap、silent）的，只作用于翻译结果浮窗，
+  不会影响你自己的缓冲区： >
+
+    q          关闭浮窗（`:q<CR>`）
+    <ESC>      关闭浮窗（`:q<CR>`）
+    <C-f>      向下滚动半屏（可用 keymap.scrollDown 修改）
+    <C-b>      向上滚动半屏（可用 keymap.scrollUp 修改）
+<
+  滚动行数按浮窗高度的一半（向下取整）计算，并且滚动动作通过
+  |nvim_win_call()| 只作用于浮窗本身。
+
+==============================================================================
+行为细节                                                        *kd-behavior*
+
+  浮窗生命周期 ~
+  - 同一时刻只保留一个翻译浮窗；再次触发翻译会先关掉旧窗口。
+  - 光标移动（`CursorMoved`，监听创建浮窗时所在的缓冲区）或离开浮窗
+    （`WinLeave`）都会自动关闭浮窗。
+  - 浮窗缓冲区设置为 modifiable=false、filetype=kd、bufhidden=wipe：
+    文件类型 kd 会自动加载 syntax/kd.vim；关窗时缓冲区被删除，随之清理
+    buffer-local 键位。自动命令使用具名 augroup `kd_translate_window`
+    （每次创建浮窗时重建，clear=true），反复翻译不会累积。
+
+  输入清洗（发送给 kd 之前）~
+  从光标或选区取到的文本会先经过 clean_links()，依次做这些处理：
+  - 去掉 Markdown 行内反引号与多行代码块；
+  - 去掉 [文本](链接)、![文本](链接)、[标签]: 链接 形式的引用定义；
+  - 去掉裸 URL（http(s)://... 与 www....）；
+  - 去掉 Markdown 的粗体与斜体标记；
+  - 把连续空白合并成一个空格，并去掉末尾的 `:`、`,`、`.` 与空白。
+
+  输出过滤（写进浮窗缓冲区之前）~
+  kd 返回的文本按行写入浮窗前，会丢弃包含“未找到守护进程”或“成功启动守护
+  进程”的行（kd 守护进程噪音）。
+
+  语言判定 ~
+  清洗后的文本如果包含空白（即多词），或者能匹配 3 字节 UTF-8 序列且首字节
+  落在 0xE4–0xE9（大致覆盖 U+4000 起的 CJK 区段），就给 kd 附加 `-t` 参数
+  （中译英），否则按单个英文单词处理。
+
+  执行方式 ~
+  通过 |vim.system()| 异步执行 `kd [ -t ] <文本>`，成功（退出码 0）时在
+  |vim.schedule()| 回调里打开浮窗。
+
+==============================================================================
+高亮组                                                        *kd-highlights*
+
+  syntax/kd.vim 只定义语法规则，不设置高亮链接；实际颜色由 Lua 侧通过
+  `:highlight` 命令显式写入，不依赖 colorscheme 中的定义（但切换 colorscheme
+  会把这些高亮组一并清除，见 |kd-configuration|）。只用 GUI 颜色
+  （guifg/guibg），不带 cterm 颜色。
+
+  kdWord        浮窗首行中，第一个空白或 `[` 之前的单词。对应配置
+                highlights.word。
+  kdPhonetic    浮窗首行方括号内的内容（音标）。对应配置
+                highlights.phonetic。
+  kdLevel       独占一行、由一个或多个 CET4 / CET6 / TEM4 / TEM8 组成的
+                等级行。对应配置 highlights.level。
+
+==============================================================================
+Lua API                                                            *kd-api*
+
+  模块入口是 require("kd")： >
+
+    require("kd").setup(opts)                    -- 合并配置并应用高亮
+    require("kd").translate(mode)                -- 取词/取选区并异步调用 kd
+    require("kd")._translate(mode)               -- 命令使用；已有浮窗则进入浮窗
+    require("kd").set_highlights()               -- 仅重新应用高亮
+    require("kd").config                         -- 当前生效的配置表
+<
+  kd.setup()                                                    *kd.setup()*
+        以默认配置为基准深合并 opts，然后重新应用高亮。可重复调用。
+  kd.translate()                                            *kd.translate()*
+        mode 为 "n" 时取 |<cword>|；为 "v"、"V" 或 <C-v> 时取最近一次可视
+        选区。执行成功后打开翻译浮窗。
+  kd._translate()                                          *kd._translate()*
+        两个用户命令实际调用的入口：若已存在有效浮窗，则把光标切换到该
+        浮窗（不重新翻译），否则等价于 |kd.translate()|。
+  kd.set_highlights()                                  *kd.set_highlights()*
+        单独重新应用三组高亮。
+  kd.config                                                      *kd.config*
+        读取当前生效的配置表（包含默认值与用户覆盖项）。
+
+==============================================================================
