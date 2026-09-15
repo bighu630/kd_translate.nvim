@@ -343,6 +343,22 @@ local function cancel_in_flight()
 	end
 end
 
+---检测 kd 可执行文件是否可用
+---@return boolean
+local function has_backend()
+	if vim.fn.executable(translate_cmd) == 1 then
+		return true
+	end
+	vim.notify(
+		string.format(
+			"未找到 %s 可执行文件，请先安装并配置 kd：https://github.com/Karmenzind/kd",
+			translate_cmd
+		),
+		vim.log.levels.ERROR
+	)
+	return false
+end
+
 -- 修改翻译函数
 function M.translate(mode)
 	-- 如果存在旧窗口，先关闭它
@@ -350,7 +366,7 @@ function M.translate(mode)
 		current_window:close()
 	end
 
-	local text = ""
+	local text
 
 	if mode ~= "v" and mode ~= "V" and mode ~= "\x16" then
 		text = vim.fn.expand("<cword>") -- 如果不在可视模式，返回光标下的词
@@ -362,6 +378,16 @@ function M.translate(mode)
 	local trimmed_text = text:match("^%s*(.-)%s*$") -- 去除首尾空格
 	trimmed_text = clean_links(trimmed_text)
 	-- vim.inspect(print(trimmed_text))
+	-- 取消旧的在途请求并作废其结果，避免竞态（即使本次后端缺失也要作废旧请求）
+	cancel_in_flight()
+	request_id = request_id + 1
+	local this_id = request_id
+
+	-- 后端缺失检测：缺失时给出可操作提示，而不是底层 spawn 错误
+	if not has_backend() then
+		return
+	end
+
 	local cmd = { translate_cmd }
 	-- 检查是否包含中文字符或内部空格
 	if trimmed_text and trimmed_text:find("[\xE4-\xE9][\x80-\xBF][\x80-\xBF]") or trimmed_text:find("%s+") then
@@ -373,20 +399,18 @@ function M.translate(mode)
 	-- vim.notify(vim.inspect(cmd))
 
 	-- 超时配置：0 或 nil 表示不限制
+	local effective_timeout = M.config.timeout
 	local system_opts = { text = true }
-	if M.config.timeout and M.config.timeout > 0 then
-		system_opts.timeout = M.config.timeout
+	if effective_timeout and effective_timeout > 0 then
+		system_opts.timeout = effective_timeout
+	else
+		effective_timeout = nil
 	end
-
-	-- 取消旧的在途请求并作废其结果，避免竞态
-	cancel_in_flight()
-	request_id = request_id + 1
-	local this_id = request_id
 
 	-- 立即显示加载态占位窗口，结果返回后原地替换
 	current_window = TranslateWindow.new("翻译中…", true)
 
-	in_flight = vim.system(cmd, system_opts, function(obj)
+	local ok, proc = pcall(vim.system, cmd, system_opts, function(obj)
 		vim.schedule(function()
 			-- 过期回调（已被更新的请求取消/作废）直接丢弃
 			if this_id ~= request_id then
@@ -402,13 +426,13 @@ function M.translate(mode)
 				if not dismissed then
 					win:set_text(obj.stdout)
 				end
-			elseif obj.code == 124 then
+			elseif effective_timeout and obj.code == 124 then
 				-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
 				if not dismissed then
 					win:close()
 				end
 				vim.notify(
-					string.format("kd 翻译超时（%d ms），请检查网络或后端", M.config.timeout),
+					string.format("kd 翻译超时（%d ms），请检查网络或后端", effective_timeout),
 					vim.log.levels.WARN
 				)
 			else
@@ -419,6 +443,19 @@ function M.translate(mode)
 			end
 		end)
 	end)
+
+	if not ok then
+		-- vim.system 自身报错（如可执行文件在检测后被移除），兜底提示
+		request_id = request_id + 1
+		in_flight = nil
+		if current_window and current_window:is_valid() then
+			current_window:close()
+		end
+		vim.notify("翻译失败: " .. tostring(proc), vim.log.levels.ERROR)
+		return
+	end
+
+	in_flight = proc
 end
 
 function M._translate(mode)
