@@ -3,6 +3,8 @@ local api = vim.api
 
 -- 默认配置
 M.config = {
+	-- kd 调用超时时间（毫秒），0 或 nil 表示不限制
+	timeout = 10000,
 	-- 翻译命令配置
 	window = {
 		width = 80, -- 最大宽度
@@ -51,6 +53,10 @@ local translate_cmd = "kd"
 
 -- 添加一个全局变量来跟踪当前的翻译窗口
 local current_window = nil
+
+-- 在途请求：保存 SystemObj 以便取消，并用 request_id 作废过期回调
+local in_flight = nil
+local request_id = 0
 
 -- 获取选中的文本
 local function get_visual_selection()
@@ -158,27 +164,35 @@ function M.set_highlights()
 	end
 end
 
+---过滤掉 kd 输出中的无关提示行
+---@param text string
+---@return string[]
+local function filter_lines(text)
+	local lines = vim.split(text, "\n")
+	local filtered = {}
+	for _, line in ipairs(lines) do
+		if not line:find("未找到守护进程") and not line:find("成功启动守护进程") then
+			table.insert(filtered, line)
+		end
+	end
+	return filtered
+end
+
 ---@class TranslateWindow
 local TranslateWindow = {}
 TranslateWindow.__index = TranslateWindow
 
 ---创建新的翻译窗口
 ---@param text string 要显示的文本内容
+---@param loading? boolean 是否为加载态占位窗口
 ---@return TranslateWindow
-function TranslateWindow.new(text)
+function TranslateWindow.new(text, loading)
 	local self = setmetatable({}, TranslateWindow)
+	self.loading = loading or false
 
-	-- 过滤掉包含特定关键字的行
-	local lines = vim.split(text, "\n")
-	local filtered_lines = {}
-	for _, line in ipairs(lines) do
-		if not line:find("未找到守护进程") and not line:find("成功启动守护进程") then
-			table.insert(filtered_lines, line)
-		end
-	end
 	-- 创建缓冲区
 	self.bufnr = api.nvim_create_buf(false, true)
-	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, filtered_lines)
+	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, filter_lines(text))
 	-- 设置缓冲区选项
 	vim.bo[self.bufnr].modifiable = false
 	vim.bo[self.bufnr].filetype = "kd" -- 这会自动加载我们的语法文件
@@ -220,6 +234,18 @@ function TranslateWindow:open()
 	vim.api.nvim_win_call(self.winid, function()
 		vim.cmd("syntax enable")
 	end)
+end
+
+---原地替换窗口内容（用于加载态占位窗转为最终结果）
+---@param text string
+function TranslateWindow:set_text(text)
+	if not self:is_valid() then
+		return
+	end
+	vim.bo[self.bufnr].modifiable = true
+	api.nvim_buf_set_lines(self.bufnr, 0, -1, false, filter_lines(text))
+	vim.bo[self.bufnr].modifiable = false
+	self.loading = false
 end
 
 ---设置按键映射（仅作用于翻译结果窗口）
@@ -307,6 +333,32 @@ local function clean_links(text)
 	return text
 end
 
+---取消当前在途的翻译请求（若有）
+local function cancel_in_flight()
+	if in_flight then
+		pcall(function()
+			in_flight:kill(15)
+		end)
+		in_flight = nil
+	end
+end
+
+---检测 kd 可执行文件是否可用
+---@return boolean
+local function has_backend()
+	if vim.fn.executable(translate_cmd) == 1 then
+		return true
+	end
+	vim.notify(
+		string.format(
+			"未找到 %s 可执行文件，请先安装并配置 kd：https://github.com/Karmenzind/kd",
+			translate_cmd
+		),
+		vim.log.levels.ERROR
+	)
+	return false
+end
+
 -- 修改翻译函数
 function M.translate(mode)
 	-- 如果存在旧窗口，先关闭它
@@ -314,7 +366,7 @@ function M.translate(mode)
 		current_window:close()
 	end
 
-	local text = ""
+	local text
 
 	if mode ~= "v" and mode ~= "V" and mode ~= "\x16" then
 		text = vim.fn.expand("<cword>") -- 如果不在可视模式，返回光标下的词
@@ -326,6 +378,16 @@ function M.translate(mode)
 	local trimmed_text = text:match("^%s*(.-)%s*$") -- 去除首尾空格
 	trimmed_text = clean_links(trimmed_text)
 	-- vim.inspect(print(trimmed_text))
+	-- 取消旧的在途请求并作废其结果，避免竞态（即使本次后端缺失也要作废旧请求）
+	cancel_in_flight()
+	request_id = request_id + 1
+	local this_id = request_id
+
+	-- 后端缺失检测：缺失时给出可操作提示，而不是底层 spawn 错误
+	if not has_backend() then
+		return
+	end
+
 	local cmd = { translate_cmd }
 	-- 检查是否包含中文字符或内部空格
 	if trimmed_text and trimmed_text:find("[\xE4-\xE9][\x80-\xBF][\x80-\xBF]") or trimmed_text:find("%s+") then
@@ -336,24 +398,69 @@ function M.translate(mode)
 
 	-- vim.notify(vim.inspect(cmd))
 
-	vim.system(cmd, { text = true }, function(obj)
-		if obj.code == 0 then
-			vim.schedule(function()
-				-- 创建新窗口并保存引用
-				current_window = TranslateWindow.new(obj.stdout)
-			end)
-		else
-			vim.schedule(function()
+	-- 超时配置：0 或 nil 表示不限制
+	local effective_timeout = M.config.timeout
+	local system_opts = { text = true }
+	if effective_timeout and effective_timeout > 0 then
+		system_opts.timeout = effective_timeout
+	else
+		effective_timeout = nil
+	end
+
+	-- 立即显示加载态占位窗口，结果返回后原地替换
+	current_window = TranslateWindow.new("翻译中…", true)
+
+	local ok, proc = pcall(vim.system, cmd, system_opts, function(obj)
+		vim.schedule(function()
+			-- 过期回调（已被更新的请求取消/作废）直接丢弃
+			if this_id ~= request_id then
+				return
+			end
+			in_flight = nil
+
+			local win = current_window
+			-- 占位窗口已被用户关闭（移动光标/离开）= 放弃本次查询
+			local dismissed = not (win and win:is_valid())
+
+			if obj.code == 0 then
+				if not dismissed then
+					win:set_text(obj.stdout)
+				end
+			elseif effective_timeout and obj.code == 124 then
+				-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
+				if not dismissed then
+					win:close()
+				end
+				vim.notify(
+					string.format("kd 翻译超时（%d ms），请检查网络或后端", effective_timeout),
+					vim.log.levels.WARN
+				)
+			else
+				if not dismissed then
+					win:close()
+				end
 				vim.notify("翻译失败: " .. (obj.stderr or "未知错误"), vim.log.levels.ERROR)
-				-- 确保错误时也清除旧窗口引用
-				current_window = nil
-			end)
-		end
+			end
+		end)
 	end)
+
+	if not ok then
+		-- vim.system 自身报错（如可执行文件在检测后被移除），兜底提示
+		request_id = request_id + 1
+		in_flight = nil
+		if current_window and current_window:is_valid() then
+			current_window:close()
+		end
+		vim.notify("翻译失败: " .. tostring(proc), vim.log.levels.ERROR)
+		return
+	end
+
+	in_flight = proc
 end
 
 function M._translate(mode)
-	if current_window and current_window:is_valid() then
+	-- 加载中的占位窗口不接管焦点；再次触发则表示发起新的翻译
+	if current_window and current_window:is_valid() and not current_window.loading then
 		-- when twice pressed the key, enter the window
 		-- enter the window
 		api.nvim_set_current_win(current_window.winid)
