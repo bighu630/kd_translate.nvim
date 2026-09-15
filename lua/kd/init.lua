@@ -330,10 +330,18 @@ end
 function TranslateWindow:setup_autocmds()
 	self.augroup = api.nvim_create_augroup("kd_translate_window", { clear = true })
 
+	-- 退出 visual 选区等操作会在浮窗打开后补发一次 CursorMoved；
+	-- 若此时直接关窗，会丢掉还没返回的结果（dismissed）。记录打开时的光标位置，
+	-- 只有光标真的移动了才关窗。
+	local origin = api.nvim_win_get_cursor(0)
 	api.nvim_create_autocmd({ "CursorMoved" }, {
 		group = self.augroup,
 		buffer = api.nvim_get_current_buf(),
 		callback = function()
+			local cur = api.nvim_win_get_cursor(0)
+			if cur[1] == origin[1] and cur[2] == origin[2] then
+				return
+			end
 			self:close()
 		end,
 	})
