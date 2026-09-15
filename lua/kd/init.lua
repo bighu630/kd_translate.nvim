@@ -394,6 +394,9 @@ function M.translate(mode)
 		-- print("here")
 		table.insert(cmd, "-t")
 	end
+	-- 用 `--` 终止 flag 解析：查询文本可能以 `-` 开头（如 Markdown 列表项 "- foo"、"-x"、"--help"），
+	-- 否则 kd 的 Go flag 解析器会把它当作未知 flag（flag provided but not defined）
+	table.insert(cmd, "--")
 	table.insert(cmd, trimmed_text)
 
 	-- vim.notify(vim.inspect(cmd))
