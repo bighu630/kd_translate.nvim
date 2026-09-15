@@ -481,8 +481,19 @@ function M.translate(mode)
 			local dismissed = not (win and win:is_valid())
 
 			if obj.code == 0 then
+				-- kd 可能以退出码 0 把提示/错误写在 stderr（例如查询被它的输入校验拒绝），
+				-- 此时 stdout 为空，只渲染 stdout 会得到一个空白浮窗；回退到 stderr。
+				local output = obj.stdout
+				if not output or output:match("^%s*$") then
+					output = obj.stderr
+				end
 				if not dismissed then
-					win:set_text(obj.stdout)
+					if output and output:match("%S") then
+						win:set_text(output)
+					else
+						win:close()
+						vim.notify("kd 没有返回任何内容", vim.log.levels.WARN)
+					end
 				end
 			elseif effective_timeout and obj.code == 124 then
 				-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
