@@ -1,0 +1,14 @@
+# StyLua 配置
+#
+# 这里的取值就是 StyLua 2.x 的默认值，显式写出来有两个目的：
+#   1) 固化仓库现有格式（Tab 缩进、双引号、120 列），避免 StyLua 上游改动
+#      默认值后 `stylua --check` 突然要求全文件重排；
+#   2) 记录这批配置的选择依据：写入本文件后 `stylua --check .` 对 lua/ 与
+#      plugin/ 依然零 diff（已实测），即格式化结果与现有代码风格一致。
+column_width = 120
+line_endings = "Unix"
+indent_type = "Tabs"
+indent_width = 4
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"
+collapse_simple_statement = "Never"
