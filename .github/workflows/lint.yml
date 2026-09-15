@@ -1,0 +1,75 @@
+name: lint
+
+# 仅在 push 时运行（不做 PR 触发、不跑测试、不做 Neovim 版本矩阵）。
+# 目的：保证进入 main 的提交都通过 stylua / luacheck / helptags 检查。
+on:
+  push:
+
+# 工作流只需要读取仓库内容
+permissions:
+  contents: read
+
+jobs:
+  stylua:
+    name: stylua --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # stylua-action 由 StyLua 作者维护；版本与本地开发环境保持一致，
+      # 避免上游默认值变化导致格式化结果漂移
+      - uses: JohnnyMorganz/stylua-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: 2.5.2
+          args: --check .
+
+  luacheck:
+    name: luacheck
+    runs-on: ubuntu-latest
+    env:
+      LUACHECK_VERSION: "1.2.0"
+    steps:
+      - uses: actions/checkout@v7
+      # luacheck 没有官方 GitHub Action，直接使用官方 release 中的独立二进制，
+      # 顺便把版本钉死
+      - name: Install luacheck
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/luacheck" \
+            "https://github.com/lunarmodules/luacheck/releases/download/v${LUACHECK_VERSION}/luacheck"
+          chmod +x "$RUNNER_TEMP/luacheck"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # 配置见仓库根目录的 .luacheckrc；这里不放宽任何规则
+      - name: Run luacheck
+        run: luacheck .
+
+  helptags:
+    name: helptags
+    runs-on: ubuntu-latest
+    env:
+      # 用插件声明的最低支持版本校验帮助文档（Neovim >= 0.10）
+      NVIM_VERSION: "v0.10.4"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Neovim
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/nvim.tar.gz" \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nvim.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Validate doc tags
+        run: |
+          set -euo pipefail
+          # nvim 在 helptags 出错时（例如 E154 重复标签）仍然返回 0，
+          # 所以必须检查命令输出，不能只看退出码
+          nvim --headless -u NONE "+helptags doc" "+q" 2>&1 | tee "$RUNNER_TEMP/helptags.log"
+          if grep -Eq 'E[0-9]{3}' "$RUNNER_TEMP/helptags.log"; then
+            echo "::error::helptags 生成失败，请检查 doc/kd.txt 中的标签定义"
+            exit 1
+          fi
+          # 确保 :help kd 可用
+          if ! awk -F'\t' '$1 == "kd" { found = 1 } END { exit !found }' doc/tags; then
+            echo "::error::doc/tags 中缺少 kd 标签，:help kd 不可用"
+            exit 1
+          fi
