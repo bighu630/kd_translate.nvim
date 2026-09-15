@@ -54,6 +54,10 @@ local translate_cmd = "kd"
 -- 添加一个全局变量来跟踪当前的翻译窗口
 local current_window = nil
 
+-- 在途请求：保存 SystemObj 以便取消，并用 request_id 作废过期回调
+local in_flight = nil
+local request_id = 0
+
 -- 获取选中的文本
 local function get_visual_selection()
 	pcall(function()
@@ -309,6 +313,16 @@ local function clean_links(text)
 	return text
 end
 
+---取消当前在途的翻译请求（若有）
+local function cancel_in_flight()
+	if in_flight then
+		pcall(function()
+			in_flight:kill(15)
+		end)
+		in_flight = nil
+	end
+end
+
 -- 修改翻译函数
 function M.translate(mode)
 	-- 如果存在旧窗口，先关闭它
@@ -344,28 +358,35 @@ function M.translate(mode)
 		system_opts.timeout = M.config.timeout
 	end
 
-	vim.system(cmd, system_opts, function(obj)
-		if obj.code == 0 then
-			vim.schedule(function()
+	-- 取消旧的在途请求并作废其结果，避免竞态
+	cancel_in_flight()
+	request_id = request_id + 1
+	local this_id = request_id
+
+	in_flight = vim.system(cmd, system_opts, function(obj)
+		vim.schedule(function()
+			-- 过期回调（已被更新的请求取消/作废）直接丢弃
+			if this_id ~= request_id then
+				return
+			end
+			in_flight = nil
+
+			if obj.code == 0 then
 				-- 创建新窗口并保存引用
 				current_window = TranslateWindow.new(obj.stdout)
-			end)
-		elseif obj.code == 124 then
-			-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
-			vim.schedule(function()
+			elseif obj.code == 124 then
+				-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
 				vim.notify(
 					string.format("kd 翻译超时（%d ms），请检查网络或后端", M.config.timeout),
 					vim.log.levels.WARN
 				)
 				current_window = nil
-			end)
-		else
-			vim.schedule(function()
+			else
 				vim.notify("翻译失败: " .. (obj.stderr or "未知错误"), vim.log.levels.ERROR)
 				-- 确保错误时也清除旧窗口引用
 				current_window = nil
-			end)
-		end
+			end
+		end)
 	end)
 end
 
