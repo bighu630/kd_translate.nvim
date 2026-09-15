@@ -3,6 +3,8 @@ local api = vim.api
 
 -- 默认配置
 M.config = {
+	-- kd 调用超时时间（毫秒），0 或 nil 表示不限制
+	timeout = 10000,
 	-- 翻译命令配置
 	window = {
 		width = 80, -- 最大宽度
@@ -336,11 +338,26 @@ function M.translate(mode)
 
 	-- vim.notify(vim.inspect(cmd))
 
-	vim.system(cmd, { text = true }, function(obj)
+	-- 超时配置：0 或 nil 表示不限制
+	local system_opts = { text = true }
+	if M.config.timeout and M.config.timeout > 0 then
+		system_opts.timeout = M.config.timeout
+	end
+
+	vim.system(cmd, system_opts, function(obj)
 		if obj.code == 0 then
 			vim.schedule(function()
 				-- 创建新窗口并保存引用
 				current_window = TranslateWindow.new(obj.stdout)
+			end)
+		elseif obj.code == 124 then
+			-- 超时：vim.system 超时后以 TERM 终止进程并返回退出码 124
+			vim.schedule(function()
+				vim.notify(
+					string.format("kd 翻译超时（%d ms），请检查网络或后端", M.config.timeout),
+					vim.log.levels.WARN
+				)
+				current_window = nil
 			end)
 		else
 			vim.schedule(function()
