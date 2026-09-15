@@ -1,6 +1,5 @@
 local M = {}
 local api = vim.api
-local fn = vim.fn
 
 -- 默认配置
 M.config = {
@@ -50,7 +49,6 @@ local translate_cmd = "kd"
 
 -- 添加一个全局变量来跟踪当前的翻译窗口
 local current_window = nil
-local cursor_win = nil
 
 -- 获取选中的文本
 local function get_visual_selection()
