@@ -182,6 +182,7 @@ function TranslateWindow.new(text)
 	-- 设置缓冲区选项
 	vim.bo[self.bufnr].modifiable = false
 	vim.bo[self.bufnr].filetype = "kd" -- 这会自动加载我们的语法文件
+	vim.bo[self.bufnr].bufhidden = "wipe" -- 关窗时销毁缓冲区，顺带清理 buffer-local 键位/autocmd
 
 	-- 确保语法高亮开启并应用自定义高亮
 	vim.api.nvim_buf_call(self.bufnr, function()
@@ -221,31 +222,27 @@ function TranslateWindow:open()
 	end)
 end
 
----设置按键映射
+---设置按键映射（仅作用于翻译结果窗口）
 function TranslateWindow:setup_keymaps()
 	local opts = { noremap = true, silent = true, buffer = self.bufnr }
 	vim.keymap.set("n", "q", ":q<CR>", opts)
 	vim.keymap.set("n", "<ESC>", ":q<CR>", opts)
-	-- I hope that I could scroll the translate window without enter it.
+	-- 滚动只在翻译结果窗口内生效，不再绑定到用户自己的 buffer
 	local scroll_lines = math.floor(api.nvim_win_get_height(self.winid) / 2) -- half sceen scroll
 	vim.keymap.set("n", M.config.keymap.scrollDown, function()
 		if api.nvim_win_is_valid(self.winid) then
 			api.nvim_win_call(self.winid, function()
 				vim.cmd("normal!" .. scroll_lines .. "j")
 			end)
-		else
-			api.nvim_feedkeys(api.nvim_replace_termcodes(M.config.keymap.scrollDown, true, true, true), "n", true)
 		end
-	end, { noremap = true, silent = true, buffer = api.nvim_get_current_buf() })
+	end, { noremap = true, silent = true, buffer = self.bufnr })
 	vim.keymap.set("n", M.config.keymap.scrollUp, function()
 		if api.nvim_win_is_valid(self.winid) then
 			api.nvim_win_call(self.winid, function()
 				vim.cmd("normal!" .. scroll_lines .. "k")
 			end)
-		else
-			api.nvim_feedkeys(api.nvim_replace_termcodes(M.config.keymap.scrollUp, true, true, true), "n", true)
 		end
-	end, { noremap = true, silent = true, buffer = api.nvim_get_current_buf() })
+	end, { noremap = true, silent = true, buffer = self.bufnr })
 end
 
 -- 设置 autocmds
