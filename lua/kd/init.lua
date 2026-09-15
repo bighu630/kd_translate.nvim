@@ -393,14 +393,13 @@ local function clean_links(text)
 	text = text:gsub("%s+", " ")
 	-- 🔥 新增：移除末尾部分标点符号
 	text = text:gsub("[:.,%s]+$", "")
-	-- 去掉行首的 Markdown 列表符（- / * / + / 1. / 1) 等，可嵌套）。
-	-- kd 的输入校验不接受 ASCII "-" 等作为首字符，不去掉的话整句会被直接拒掉。
-	local stripped
-	repeat
-		stripped = text
-		text = text:gsub("^%s*[-%*%+]%s+", "")
-		text = text:gsub("^%s*%d+[%.%)]%s+", "")
-	until text == stripped
+	-- kd 的输入校验只接受字母/数字/CJK 作为首字符；把开头的其它字符
+	-- （Markdown 列表符、Lua 注释 "--"、前导标点等）都截掉，从第一个
+	-- kd 能接受的字符开始，否则整句会被 kd 直接拒掉。
+	local first = text:find("[%w\xE4-\xE9]")
+	if first and first > 1 then
+		text = text:sub(first)
+	end
 	return text
 end
 
